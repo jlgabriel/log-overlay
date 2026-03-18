@@ -4,8 +4,6 @@ Real-time transparent log overlay for Windows. Displays the last lines of any lo
 
 Designed for **X-Plane** flight simulator, but works with any text log file.
 
-![Log Overlay Screenshot](screenshot.png)
-
 ## Features
 
 - Transparent, click-through overlay (doesn't interfere with your sim)
