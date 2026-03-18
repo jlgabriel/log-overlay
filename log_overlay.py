@@ -97,6 +97,7 @@ def load_config(cli_args):
         "font_size": 11,
         "position": "bottom-right",
         "margin": 20,
+        "width": 1200,
         "color_coding": True,
         "color_error": "#ff6b6b",
         "color_warning": "#ffd93d",
@@ -113,7 +114,7 @@ def load_config(cli_args):
             val = cp.get("log", "path").strip()
             if val:
                 defaults["logfile"] = val
-        for key in ["lines", "opacity", "font_size", "margin"]:
+        for key in ["lines", "opacity", "font_size", "margin", "width"]:
             if cp.has_option("overlay", key):
                 val = cp.get("overlay", key).strip()
                 if val:
@@ -298,7 +299,7 @@ class OverlayWindow:
 
     def _position_window(self):
         """Position the window in the chosen screen corner."""
-        width = 1200
+        width = self.config["width"]
         height = (self.max_lines + 2) * (self.config["font_size"] + 8) + 40
 
         screen_w = self.root.winfo_screenwidth()

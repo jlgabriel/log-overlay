@@ -43,6 +43,7 @@ Edit `config.ini` next to the app. All settings are optional.
 | `[overlay]` | `opacity` | `0.80` | Window opacity (0.0 - 1.0) |
 | `[overlay]` | `font_size` | `11` | Font size in points |
 | `[overlay]` | `position` | `bottom-right` | top-left, top-right, bottom-left, bottom-right, center |
+| `[overlay]` | `width` | `1200` | Overlay width in pixels |
 | `[overlay]` | `margin` | `20` | Margin from screen edge (px) |
 | `[colors]` | `color_coding` | `true` | Enable color-coded lines |
 | `[colors]` | `color_error` | `#ff6b6b` | Color for error lines |
