@@ -1,0 +1,16 @@
+[project]
+name = "log-overlay"
+version = "1.0.0"
+description = "Real-time transparent log overlay for Windows, designed for X-Plane flight simulator"
+requires-python = ">=3.9"
+license = "MIT"
+dependencies = [
+    "pywin32>=306",
+]
+
+[project.optional-dependencies]
+tray = ["pystray>=0.19", "Pillow>=10.0"]
+all = ["pystray>=0.19", "Pillow>=10.0"]
+
+[project.scripts]
+log-overlay = "log_overlay:main"
