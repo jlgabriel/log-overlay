@@ -53,7 +53,8 @@ build.bat   # outputs dist/LogOverlay.exe + dist/config.ini
 - Overlay height calculated from actual font metrics to avoid empty space
 - Filtering searches the full 5000-line buffer, not just visible lines
 
-## Hotkeys
+## Controls
 
-- `Ctrl+Shift+Q` — Quit
-- `Ctrl+Shift+H` — Toggle overlay visibility
+- Control bar: Hide/Show button, X to quit (draggable)
+- Tag bar: clickable filter tags above the overlay (draggable)
+- System tray: right-click menu (Show/Hide, Open Config, Quit)

@@ -14,7 +14,6 @@ Designed for **X-Plane** flight simulator, but works with any text log file.
 - System tray icon with menu
 - Auto-detects X-Plane's Log.txt location
 - Configurable via `config.ini` (no command line needed)
-- Hotkeys: `Ctrl+Shift+Q` quit, `Ctrl+Shift+H` show/hide
 
 ## Quick Start (EXE)
 
@@ -65,8 +64,8 @@ python log_overlay.py --logfile "C:\X-Plane 12\Log.txt" --lines 20 --opacity 0.9
 
 | Action | Method |
 |--------|--------|
-| Quit | `Ctrl+Shift+Q` or tray menu > Quit |
-| Show/Hide | `Ctrl+Shift+H` or tray menu > Show/Hide |
+| Quit | Control bar X button or tray menu > Quit |
+| Show/Hide | Control bar Hide/Show button or tray menu > Show/Hide |
 | Edit Config | Tray menu > Open Config |
 
 ## Building the EXE
