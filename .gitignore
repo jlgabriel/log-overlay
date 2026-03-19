@@ -1,3 +1,6 @@
+# Log examples (third-party, not for redistribution)
+log_examples/
+
 __pycache__/
 *.pyc
 *.pyo

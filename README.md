@@ -7,7 +7,10 @@ Designed for **X-Plane** flight simulator, but works with any text log file.
 ## Features
 
 - Transparent, click-through overlay (doesn't interfere with your sim)
+- **Smart tag filtering** — automatically detects log sources (plugins, subsystems) and displays clickable filter tags
+- Filter from a deep buffer (5000 lines) so you can find relevant lines even after they scroll off screen
 - Color-coded lines: red for errors, yellow for warnings
+- Dynamic overlay height — window fits exactly the configured number of lines, no wasted space
 - System tray icon with menu
 - Auto-detects X-Plane's Log.txt location
 - Configurable via `config.ini` (no command line needed)
@@ -44,6 +47,7 @@ Edit `config.ini` next to the app. All settings are optional.
 | `[overlay]` | `font_size` | `11` | Font size in points |
 | `[overlay]` | `position` | `bottom-right` | top-left, top-right, bottom-left, bottom-right, center |
 | `[overlay]` | `width` | `1200` | Overlay width in pixels |
+| `[overlay]` | `max_tags` | `20` | Maximum number of filter tags to show |
 | `[overlay]` | `margin` | `20` | Margin from screen edge (px) |
 | `[colors]` | `color_coding` | `true` | Enable color-coded lines |
 | `[colors]` | `color_error` | `#ff6b6b` | Color for error lines |

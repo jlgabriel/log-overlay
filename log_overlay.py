@@ -21,6 +21,7 @@ Controls:
 
 import sys
 import os
+import re
 import time
 import argparse
 import threading
@@ -98,6 +99,7 @@ def load_config(cli_args):
         "position": "bottom-right",
         "margin": 20,
         "width": 1200,
+        "max_tags": 20,
         "color_coding": True,
         "color_error": "#ff6b6b",
         "color_warning": "#ffd93d",
@@ -114,7 +116,7 @@ def load_config(cli_args):
             val = cp.get("log", "path").strip()
             if val:
                 defaults["logfile"] = val
-        for key in ["lines", "opacity", "font_size", "margin", "width"]:
+        for key in ["lines", "opacity", "font_size", "margin", "width", "max_tags"]:
             if cp.has_option("overlay", key):
                 val = cp.get("overlay", key).strip()
                 if val:
@@ -152,6 +154,78 @@ def load_config(cli_args):
     return defaults
 
 
+# --- Tag Extraction ---
+
+# Strip leading timestamps: "0:00:00.000 " or "2026-03-18 23:34:18 " or "2026-03-18T23:07:49.063 "
+_RE_TIMESTAMP = re.compile(
+    r'^(?:\d+:\d+:\d+\.\d+\s+'           # X-Plane style: 0:00:00.000
+    r'|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[\d.,]*\s*'  # ISO style: 2026-03-18T23:07:49.063 or 2026-03-18 23:34:18
+    r')'
+)
+
+# Precompiled patterns for log source extraction (applied after timestamp strip)
+_RE_XPLANE_SYS = re.compile(r'^[IEWD]/([^:]+):')
+_RE_BRACKET_PLUGIN = re.compile(r'^\[([^\]]+)\]')
+_RE_BARE_PLUGIN = re.compile(r'^([A-Za-z][\w.:-]*[\w])[\[: (]')
+
+# Words that look like plugin names but are generic log content
+_BARE_FALSE_POSITIVES = frozenset((
+    'Loaded', 'Fetching', 'Queue', 'Heap', 'Memory', 'Vulkan',
+    'OpenGL', 'Windows', 'This', 'CPU', 'Physical', 'Maximum',
+    'Compiled', 'Device', 'Host', 'Log', 'Global',
+    'Custom', 'Resources', 'Discovered', 'Created', 'Picked',
+    'WARNING', 'ERROR', 'INFO', 'DEBUG', 'FATAL',
+))
+
+
+def _clean_bracket_name(name):
+    """Normalize a bracketed tag name: strip paths, suffixes, level indicators."""
+    # Take first segment before '/' to strip paths (XPUIPC/64/win.xpl -> XPUIPC)
+    if '/' in name:
+        name = name.split('/')[0]
+    # Remove .xpl extension
+    if name.lower().endswith('.xpl'):
+        name = name[:-4]
+    # Remove trailing level indicators (INFO, WARN, etc.)
+    for suffix in (' INFO', ' WARN', ' ERROR', ' DEBUG'):
+        if name.upper().endswith(suffix):
+            name = name[:len(name) - len(suffix)].strip()
+            break
+    return name
+
+
+def extract_tag(line):
+    """Extract the source tag from a log line.
+
+    Returns a short string identifying the source, e.g. 'GFX', 'APT',
+    'XJet', 'FlyWithLua', or 'OTHER' if no pattern matches.
+    """
+    # Step 0: Strip leading timestamp so all patterns work on the "meat"
+    stripped = _RE_TIMESTAMP.sub('', line)
+
+    # Pattern 1: X-Plane system  e.g. "I/GFX/VK: ..." (after timestamp strip)
+    m = _RE_XPLANE_SYS.match(stripped)
+    if m:
+        source = m.group(1)
+        return source.split('/')[0].upper()
+
+    # Pattern 2: Bracketed plugin  e.g. "[XJet] ...", "[XPUIPC/64/win.xpl]: ..."
+    m = _RE_BRACKET_PLUGIN.match(stripped)
+    if m:
+        name = _clean_bracket_name(m.group(1).strip())
+        if name:
+            return name
+
+    # Pattern 3: Bare plugin name  e.g. "X-Camera: ...", "ERJ_FMS[fms:c:1576]: ..."
+    m = _RE_BARE_PLUGIN.match(stripped)
+    if m:
+        name = m.group(1)
+        if name not in _BARE_FALSE_POSITIVES:
+            return name
+
+    return 'OTHER'
+
+
 # --- Log Tailer ---
 
 class LogTailer:
@@ -161,7 +235,8 @@ class LogTailer:
         self.filepath = filepath
         self.max_lines = max_lines
         self.callback = callback
-        self.lines = deque(maxlen=max_lines)
+        self.lines = deque(maxlen=max_lines)       # stores (line_text, tag) tuples
+        self.all_lines = deque(maxlen=5000)         # larger buffer for tag counting
         self._stop_event = threading.Event()
         self._thread = None
 
@@ -193,7 +268,9 @@ class LogTailer:
                 if line:
                     clean = line.rstrip("\n\r")
                     if clean:
-                        self.lines.append(clean)
+                        entry = (clean, extract_tag(clean))
+                        self.lines.append(entry)
+                        self.all_lines.append(entry)
                         if self.callback:
                             self.callback(list(self.lines))
                 else:
@@ -225,10 +302,17 @@ class LogTailer:
             remaining -= read_size
 
         text = "".join(blocks)
-        all_lines = text.splitlines()
-        for line in all_lines[-self.max_lines:]:
+        all_file_lines = text.splitlines()
+
+        # Load ALL lines into the big buffer for tag counting / filtering
+        for line in all_file_lines:
             if line.strip():
-                self.lines.append(line)
+                entry = (line, extract_tag(line))
+                self.all_lines.append(entry)
+
+        # Only the last N into the visible buffer
+        for entry in list(self.all_lines)[-self.max_lines:]:
+            self.lines.append(entry)
 
 
 # --- Overlay Window ---
@@ -240,6 +324,10 @@ class OverlayWindow:
         self.config = config
         self.max_lines = config["lines"]
         self.visible = True
+        self.active_tags = set()    # empty = show all
+        self._last_lines = []       # raw (line, tag) tuples from tailer
+        self.tag_bar = None         # set after TagBar is created
+        self.tailer = None          # set after LogTailer is created
 
         bg = config["background"]
 
@@ -300,15 +388,22 @@ class OverlayWindow:
     def _position_window(self):
         """Position the window in the chosen screen corner."""
         width = self.config["width"]
-        height = (self.max_lines + 2) * (self.config["font_size"] + 8) + 40
+
+        # Calculate height from actual font metrics
+        line_height = self.mono_font.metrics("linespace")
+        # Text lines + status bar + padding (frame pady=8 top+bottom, plus status label)
+        status_height = (self.config["font_size"] - 2) + 8
+        height = (self.max_lines * line_height) + status_height + 16 + 4
 
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         m = self.config["margin"]
 
+        # Extra top offset to avoid overlapping X-Plane's menu bar (~40px)
+        top_offset = 40
         positions = {
-            "top-left":     (m, m),
-            "top-right":    (screen_w - width - m, m),
+            "top-left":     (m, m + top_offset),
+            "top-right":    (screen_w - width - m, m + top_offset),
             "bottom-left":  (m, screen_h - height - m - 40),
             "bottom-right": (screen_w - width - m, screen_h - height - m - 40),
             "center":       ((screen_w - width) // 2, (screen_h - height) // 2),
@@ -352,25 +447,51 @@ class OverlayWindow:
             return "warning"
         return "normal"
 
-    def update_text(self, lines):
-        """Update the displayed text (thread-safe via root.after)."""
+    def update_text(self, lines_with_tags):
+        """Update the displayed text (thread-safe via root.after).
+
+        Args:
+            lines_with_tags: list of (line_text, source_tag) tuples from tailer.lines (visible).
+        """
+        self._last_lines = lines_with_tags
+
         def _update():
+            # When filtering, search the full buffer for matching lines
+            if self.active_tags and self.tailer:
+                all_matching = [(l, t) for l, t in self.tailer.all_lines if t in self.active_tags]
+                visible = all_matching[-self.max_lines:]
+            else:
+                visible = lines_with_tags
+
             self.text.config(state=tk.NORMAL)
             self.text.delete("1.0", tk.END)
-            if lines:
-                for i, line in enumerate(lines):
+            if visible:
+                for i, (line, _src_tag) in enumerate(visible):
                     if len(line) > 180:
                         line = line[:177] + "..."
-                    tag = self._classify_line(line)
+                    color_tag = self._classify_line(line)
                     if i > 0:
                         self.text.insert(tk.END, "\n")
-                    self.text.insert(tk.END, line, tag)
+                    self.text.insert(tk.END, line, color_tag)
             else:
-                self.text.insert(tk.END, "(empty log)", "normal")
+                self.text.insert(tk.END, "(no matching lines)", "normal")
             self.text.see(tk.END)
             self.text.xview_moveto(0)
             self.text.config(state=tk.DISABLED)
+
+            # Update tag bar counts from the full buffer
+            if self.tag_bar and self.tailer:
+                self.tag_bar.update_tags(list(self.tailer.all_lines))
+            elif self.tag_bar:
+                self.tag_bar.update_tags(lines_with_tags)
+
         self.root.after(0, _update)
+
+    def set_filter(self, tags):
+        """Set active filter tags. Empty set = show all."""
+        self.active_tags = tags
+        if self._last_lines:
+            self.update_text(self._last_lines)
 
     def set_status(self, text):
         """Update the status bar text."""
@@ -379,11 +500,15 @@ class OverlayWindow:
         self.root.after(0, _update)
 
     def toggle_visibility(self):
-        """Show or hide the overlay."""
+        """Show or hide the overlay and tag bar."""
         if self.visible:
             self.root.withdraw()
+            if self.tag_bar:
+                self.tag_bar.win.withdraw()
         else:
             self.root.deiconify()
+            if self.tag_bar:
+                self.tag_bar.win.deiconify()
         self.visible = not self.visible
 
     def quit(self):
@@ -392,6 +517,137 @@ class OverlayWindow:
 
     def run(self):
         self.root.mainloop()
+
+
+# --- Tag Filter Bar ---
+
+class TagBar:
+    """Clickable tag bar above the overlay for filtering log sources."""
+
+    def __init__(self, overlay):
+        self.overlay = overlay
+        self.max_tags = overlay.config.get("max_tags", 20)
+        self._active = set()        # currently selected tags
+        self._buttons = {}          # tag -> Button widget
+        self._known_tags = []       # ordered list of top tags
+
+        bg = "#1a1a2e"
+        self.win = tk.Toplevel(overlay.root)
+        self.win.title("Log Tags")
+        self.win.overrideredirect(True)
+        self.win.attributes("-topmost", True)
+        self.win.attributes("-alpha", 0.90)
+        self.win.configure(bg=bg)
+
+        self._frame = tk.Frame(self.win, bg=bg, padx=4, pady=3)
+        self._frame.pack(fill=tk.X)
+
+        self._btn_font = tkfont.Font(family="Consolas", size=8)
+
+        # ALL button (always present)
+        self._all_btn = tk.Button(
+            self._frame, text="ALL", font=self._btn_font,
+            fg="#e0e0e0", bg="#3a3a6e", activebackground="#4a4a7e",
+            activeforeground="#ffffff", relief=tk.FLAT, padx=6, pady=1,
+            command=self._clear_filter,
+        )
+        self._all_btn.pack(side=tk.LEFT, padx=2)
+
+        # Position near the overlay
+        self.win.update_idletasks()
+        self._position()
+
+        # Enable dragging
+        self._drag_data = {"x": 0, "y": 0}
+        self.win.bind("<Button-1>", self._on_drag_start)
+        self.win.bind("<B1-Motion>", self._on_drag_motion)
+        self._frame.bind("<Button-1>", self._on_drag_start)
+        self._frame.bind("<B1-Motion>", self._on_drag_motion)
+
+    def _position(self):
+        """Position the tag bar just above the overlay window."""
+        overlay_x = self.overlay.root.winfo_x()
+        overlay_y = self.overlay.root.winfo_y()
+        bar_h = self.win.winfo_reqheight()
+        self.win.geometry(f"+{overlay_x}+{max(0, overlay_y - bar_h - 2)}")
+
+    def update_tags(self, lines_with_tags):
+        """Rebuild tag buttons based on frequency in the current lines."""
+        # Count tags
+        counts = {}
+        for _line, tag in lines_with_tags:
+            counts[tag] = counts.get(tag, 0) + 1
+
+        # Sort by frequency, take top N (exclude OTHER from ranking unless it's all we have)
+        ranked = sorted(counts.keys(), key=lambda t: counts[t], reverse=True)
+        top = [t for t in ranked if t != 'OTHER'][:self.max_tags]
+        if 'OTHER' in counts and len(top) < self.max_tags:
+            top.append('OTHER')
+
+        if top == self._known_tags:
+            # Just update visual state, no rebuild needed
+            self._refresh_button_styles()
+            return
+
+        self._known_tags = top
+
+        # Destroy old buttons (except ALL)
+        for btn in self._buttons.values():
+            btn.destroy()
+        self._buttons.clear()
+
+        # Create new buttons
+        for tag in top:
+            btn = tk.Button(
+                self._frame, text=tag, font=self._btn_font,
+                fg="#888899", bg="#2a2a4e", activebackground="#3a3a5e",
+                activeforeground="#ffffff", relief=tk.FLAT, padx=6, pady=1,
+                command=lambda t=tag: self._toggle_tag(t),
+            )
+            btn.pack(side=tk.LEFT, padx=1)
+            self._buttons[tag] = btn
+
+        self._refresh_button_styles()
+        self.win.update_idletasks()
+
+    def _toggle_tag(self, tag):
+        """Toggle a single tag filter on/off."""
+        if tag in self._active:
+            self._active.discard(tag)
+        else:
+            self._active.add(tag)
+        self._refresh_button_styles()
+        self.overlay.set_filter(set(self._active))
+
+    def _clear_filter(self):
+        """Clear all filters (show all lines)."""
+        self._active.clear()
+        self._refresh_button_styles()
+        self.overlay.set_filter(set())
+
+    def _refresh_button_styles(self):
+        """Update button colors based on active state."""
+        has_filter = bool(self._active)
+        # ALL button
+        if has_filter:
+            self._all_btn.config(fg="#888899", bg="#2a2a4e")
+        else:
+            self._all_btn.config(fg="#e0e0e0", bg="#3a3a6e")
+
+        for tag, btn in self._buttons.items():
+            if tag in self._active:
+                btn.config(fg="#ffffff", bg="#4a6a9e")
+            else:
+                btn.config(fg="#888899", bg="#2a2a4e")
+
+    def _on_drag_start(self, event):
+        self._drag_data["x"] = event.x
+        self._drag_data["y"] = event.y
+
+    def _on_drag_motion(self, event):
+        x = self.win.winfo_x() + (event.x - self._drag_data["x"])
+        y = self.win.winfo_y() + (event.y - self._drag_data["y"])
+        self.win.geometry(f"+{x}+{y}")
 
 
 # --- Control Bar (small floating toolbar with buttons) ---
@@ -467,9 +723,12 @@ class ControlBar:
         if "top" in pos:
             y = m
         else:
-            # Just above the overlay
-            overlay_y = self.overlay.root.winfo_y()
-            y = max(m, overlay_y - 30)
+            # Just above the tag bar (or overlay if no tag bar)
+            if self.overlay.tag_bar:
+                ref_y = self.overlay.tag_bar.win.winfo_y()
+            else:
+                ref_y = self.overlay.root.winfo_y()
+            y = max(m, ref_y - 30)
 
         self.win.geometry(f"+{x}+{y}")
 
@@ -612,12 +871,15 @@ def main():
     print()
 
     overlay = OverlayWindow(config)
-    control_bar = ControlBar(overlay)
     tailer = LogTailer(
         filepath=logpath,
         max_lines=config["lines"],
         callback=overlay.update_text,
     )
+    overlay.tailer = tailer
+    tag_bar = TagBar(overlay)
+    overlay.tag_bar = tag_bar
+    control_bar = ControlBar(overlay)
 
     status = f"  {os.path.basename(logpath)}"
     overlay.set_status(status)
