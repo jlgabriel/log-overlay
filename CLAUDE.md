@@ -11,11 +11,11 @@ Real-time transparent overlay that displays the last N lines of a log file on Wi
 
 ## Project Structure
 
-Single-file application: `log_overlay.py` (~900 lines) containing:
+Single-file application: `log_overlay.py` (~950 lines) containing:
 - `extract_tag()` — smart log source detection via regex (handles timestamps, bracketed plugins, bare names, X-Plane system prefixes)
 - `LogTailer` — background thread that polls log file for new lines (tail -f style), stores (line, tag) tuples in both visible and deep (5000-line) buffers
 - `OverlayWindow` — transparent, click-through, always-on-top Tkinter window with color-coded lines and tag-based filtering
-- `TagBar` — clickable tag filter bar above the overlay, auto-populated from log source frequency
+- `TagBar` — clickable tag filter bar above the overlay with ALL/WARNINGS/ERRORS buttons + auto-populated source tags
 - `ControlBar` — small draggable toolbar (Hide/Show, Close) that IS interactive
 - `TrayIcon` — system tray icon with context menu (runs in daemon thread)
 - `load_config()` / `auto_detect_logfile()` — config loading + X-Plane path detection
@@ -43,7 +43,7 @@ build.bat   # outputs dist/LogOverlay.exe + dist/config.ini
 - ControlBar is NOT click-through (separate window for user interaction)
 - TagBar is NOT click-through (interactive filter buttons above the overlay)
 - LogTailer uses polling (0.2s interval) — simple, cross-compatible, no file system watchers
-- Handles log rotation: detects file size shrink, resets to beginning
+- Handles log rotation: detects file size shrink, resets to beginning, clears all buffers and filters
 - UTF-8 with error tolerance (`errors='replace'`)
 - Lines truncated at 180 chars with "..."
 - Error/warning detection via keyword matching (ERROR, FAIL, CRASH, WARNING, etc.)
@@ -52,9 +52,10 @@ build.bat   # outputs dist/LogOverlay.exe + dist/config.ini
 - Top positions offset 40px down to avoid overlapping X-Plane's menu bar
 - Overlay height calculated from actual font metrics to avoid empty space
 - Filtering searches the full 5000-line buffer, not just visible lines
+- Severity filters (WARNINGS/ERRORS) are mutually exclusive with tag filters for simple UX
 
 ## Controls
 
 - Control bar: Hide/Show button, X to quit (draggable)
-- Tag bar: clickable filter tags above the overlay (draggable)
+- Tag bar: ALL (clear filters), WARNINGS (yellow lines only), ERRORS (red lines only), + source tags (draggable)
 - System tray: right-click menu (Show/Hide, Open Config, Quit)

@@ -8,8 +8,10 @@ Designed for **X-Plane** flight simulator, but works with any text log file.
 
 - Transparent, click-through overlay (doesn't interfere with your sim)
 - **Smart tag filtering** — automatically detects log sources (plugins, subsystems) and displays clickable filter tags
+- **Severity filter buttons** — WARNINGS and ERRORS buttons to quickly isolate problem lines from the full log buffer
 - Filter from a deep buffer (5000 lines) so you can find relevant lines even after they scroll off screen
 - Color-coded lines: red for errors, yellow for warnings
+- Auto-reset on log rotation — filters and buffers clear automatically when X-Plane restarts
 - Dynamic overlay height — window fits exactly the configured number of lines, no wasted space
 - System tray icon with menu
 - Auto-detects X-Plane's Log.txt location
@@ -66,6 +68,9 @@ python log_overlay.py --logfile "C:\X-Plane 12\Log.txt" --lines 20 --opacity 0.9
 |--------|--------|
 | Quit | Control bar X button or tray menu > Quit |
 | Show/Hide | Control bar Hide/Show button or tray menu > Show/Hide |
+| Filter Warnings | Click WARNINGS button in tag bar |
+| Filter Errors | Click ERRORS button in tag bar |
+| Show All | Click ALL button in tag bar (clears all filters) |
 | Edit Config | Tray menu > Open Config |
 
 ## Building the EXE

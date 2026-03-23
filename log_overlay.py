@@ -280,6 +280,9 @@ class LogTailer:
                         if file_size < current_pos:
                             f.seek(0)
                             self.lines.clear()
+                            self.all_lines.clear()
+                            if self.callback:
+                                self.callback(list(self.lines))
                     except OSError:
                         pass
                     time.sleep(0.2)
@@ -325,6 +328,7 @@ class OverlayWindow:
         self.max_lines = config["lines"]
         self.visible = True
         self.active_tags = set()    # empty = show all
+        self.severity_filter = None # None, "warning", or "error"
         self._last_lines = []       # raw (line, tag) tuples from tailer
         self.tag_bar = None         # set after TagBar is created
         self.tailer = None          # set after LogTailer is created
@@ -453,11 +457,25 @@ class OverlayWindow:
         Args:
             lines_with_tags: list of (line_text, source_tag) tuples from tailer.lines (visible).
         """
+        # Detect log rotation (empty list after buffers cleared) — reset filters
+        if not lines_with_tags and self._last_lines:
+            self.active_tags = set()
+            self.severity_filter = None
+            if self.tag_bar:
+                self.tag_bar._active.clear()
+                self.tag_bar._severity_filter = None
+                self.tag_bar._refresh_button_styles()
+
         self._last_lines = lines_with_tags
 
         def _update():
             # When filtering, search the full buffer for matching lines
-            if self.active_tags and self.tailer:
+            severity = getattr(self, 'severity_filter', None)
+            if severity and self.tailer:
+                all_matching = [(l, t) for l, t in self.tailer.all_lines
+                                if self._classify_line(l) == severity]
+                visible = all_matching[-self.max_lines:]
+            elif self.active_tags and self.tailer:
                 all_matching = [(l, t) for l, t in self.tailer.all_lines if t in self.active_tags]
                 visible = all_matching[-self.max_lines:]
             else:
@@ -487,9 +505,10 @@ class OverlayWindow:
 
         self.root.after(0, _update)
 
-    def set_filter(self, tags):
-        """Set active filter tags. Empty set = show all."""
+    def set_filter(self, tags, severity=None):
+        """Set active filter tags and/or severity. Empty set + None = show all."""
         self.active_tags = tags
+        self.severity_filter = severity
         if self._last_lines:
             self.update_text(self._last_lines)
 
@@ -528,6 +547,7 @@ class TagBar:
         self.overlay = overlay
         self.max_tags = overlay.config.get("max_tags", 20)
         self._active = set()        # currently selected tags
+        self._severity_filter = None  # None, "warning", or "error"
         self._buttons = {}          # tag -> Button widget
         self._known_tags = []       # ordered list of top tags
 
@@ -552,6 +572,24 @@ class TagBar:
             command=self._clear_filter,
         )
         self._all_btn.pack(side=tk.LEFT, padx=2)
+
+        # WARNINGS button
+        self._warn_btn = tk.Button(
+            self._frame, text="WARNINGS", font=self._btn_font,
+            fg="#ffd93d", bg="#3a3a2e", activebackground="#4a4a3e",
+            activeforeground="#ffffff", relief=tk.FLAT, padx=6, pady=1,
+            command=lambda: self._toggle_severity("warning"),
+        )
+        self._warn_btn.pack(side=tk.LEFT, padx=2)
+
+        # ERRORS button
+        self._err_btn = tk.Button(
+            self._frame, text="ERRORS", font=self._btn_font,
+            fg="#ff6b6b", bg="#3a2a2e", activebackground="#4a3a3e",
+            activeforeground="#ffffff", relief=tk.FLAT, padx=6, pady=1,
+            command=lambda: self._toggle_severity("error"),
+        )
+        self._err_btn.pack(side=tk.LEFT, padx=2)
 
         # Position near the overlay
         self.win.update_idletasks()
@@ -610,29 +648,53 @@ class TagBar:
         self._refresh_button_styles()
         self.win.update_idletasks()
 
+    def _toggle_severity(self, level):
+        """Toggle a severity filter (warning/error) on/off."""
+        if self._severity_filter == level:
+            self._severity_filter = None
+        else:
+            self._severity_filter = level
+            self._active.clear()  # mutually exclusive with tag filters
+        self._refresh_button_styles()
+        self.overlay.set_filter(set(), self._severity_filter)
+
     def _toggle_tag(self, tag):
         """Toggle a single tag filter on/off."""
         if tag in self._active:
             self._active.discard(tag)
         else:
             self._active.add(tag)
+        self._severity_filter = None  # mutually exclusive with severity
         self._refresh_button_styles()
         self.overlay.set_filter(set(self._active))
 
     def _clear_filter(self):
         """Clear all filters (show all lines)."""
         self._active.clear()
+        self._severity_filter = None
         self._refresh_button_styles()
         self.overlay.set_filter(set())
 
     def _refresh_button_styles(self):
         """Update button colors based on active state."""
-        has_filter = bool(self._active)
+        has_filter = bool(self._active) or self._severity_filter is not None
         # ALL button
         if has_filter:
             self._all_btn.config(fg="#888899", bg="#2a2a4e")
         else:
             self._all_btn.config(fg="#e0e0e0", bg="#3a3a6e")
+
+        # WARNINGS button
+        if self._severity_filter == "warning":
+            self._warn_btn.config(fg="#ffffff", bg="#6a6a2e")
+        else:
+            self._warn_btn.config(fg="#ffd93d", bg="#3a3a2e")
+
+        # ERRORS button
+        if self._severity_filter == "error":
+            self._err_btn.config(fg="#ffffff", bg="#6e3a3a")
+        else:
+            self._err_btn.config(fg="#ff6b6b", bg="#3a2a2e")
 
         for tag, btn in self._buttons.items():
             if tag in self._active:
