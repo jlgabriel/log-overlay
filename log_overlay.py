@@ -174,6 +174,17 @@ _RE_TIMESTAMP = re.compile(
 
 # Precompiled patterns for log source extraction (applied after timestamp strip)
 _RE_XPLANE_SYS = re.compile(r'^[IEWD]/([^:]+):')
+
+# Severity keywords for lines without an X-Plane level prefix (whole words only)
+_RE_ERROR_WORD = re.compile(
+    r'\b(?:ERRORS?|FAIL(?:S|ED|ING|URES?)?|CRASH(?:ES|ED|ING)?|EXCEPTIONS?|FATAL)\b',
+    re.IGNORECASE,
+)
+_RE_WARNING_WORD = re.compile(r'\b(?:WARN(?:S|ED|INGS?)?|CAUTION)\b', re.IGNORECASE)
+
+# First line of X-Plane's log: mentions "errors" without reporting any
+_XPLANE_LOG_HEADER = "This log file is generated automatically"
+
 _RE_BRACKET_PLUGIN = re.compile(r'^\[([^\]]+)\]')
 _RE_BARE_PLUGIN = re.compile(r'^([A-Za-z][\w.:-]*[\w])[\[: (]')
 
@@ -475,10 +486,15 @@ class OverlayWindow:
         """Return the tag name for a log line based on its content."""
         if not self.config["color_coding"]:
             return "normal"
-        upper = line.upper()
-        if any(kw in upper for kw in ("ERROR", "FAIL", "CRASH", "EXCEPTION", "FATAL")):
+        stripped = _RE_TIMESTAMP.sub('', line)
+        # X-Plane states the level itself, whatever words the message contains
+        if _RE_XPLANE_SYS.match(stripped):
+            return {"E": "error", "W": "warning"}.get(stripped[0], "normal")
+        if stripped.startswith(_XPLANE_LOG_HEADER):
+            return "normal"
+        if _RE_ERROR_WORD.search(stripped):
             return "error"
-        if any(kw in upper for kw in ("WARNING", "WARN", "W/", "CAUTION")):
+        if _RE_WARNING_WORD.search(stripped):
             return "warning"
         return "normal"
 
@@ -554,9 +570,9 @@ class OverlayWindow:
         self.text.delete("1.0", tk.END)
         if visible:
             for i, (line, _src_tag) in enumerate(visible):
+                color_tag = self._classify_line(line)  # before truncating, like the filters
                 if len(line) > 180:
                     line = line[:177] + "..."
-                color_tag = self._classify_line(line)
                 if i > 0:
                     self.text.insert(tk.END, "\n")
                 self.text.insert(tk.END, line, color_tag)

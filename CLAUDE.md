@@ -51,7 +51,7 @@ build.bat   # outputs dist/LogOverlay.exe + dist/config.ini
 - Handles log rotation: detects file size shrink, resets to beginning, clears all buffers and filters
 - UTF-8 with error tolerance (`errors='replace'`)
 - Lines truncated at 180 chars with "..."
-- Error/warning detection via keyword matching (ERROR, FAIL, CRASH, WARNING, etc.)
+- Error/warning detection trusts X-Plane's level prefix (`E/`, `W/`, `I/`, `D/`); lines without one use whole-word keywords (ERROR, FAIL, CRASH, WARNING, etc.)
 - Tag extraction strips leading timestamps before pattern matching for robust detection
 - Bracketed plugin names are normalized (paths stripped, suffixes removed)
 - Top positions offset 40px down to avoid overlapping X-Plane's menu bar
