@@ -7,6 +7,7 @@ Designed for **X-Plane** flight simulator, but works with any text log file.
 ## Features
 
 - Transparent, click-through overlay (doesn't interfere with your sim)
+- **Scrollback** — scroll through the last 5000 lines with the scrollbar or mouse wheel; the view pauses while you read and LIVE returns to the end
 - **Smart tag filtering** — automatically detects log sources (plugins, subsystems) and displays clickable filter tags
 - **Severity filter buttons** — WARNINGS and ERRORS buttons to quickly isolate problem lines from the full log buffer
 - Filter from a deep buffer (5000 lines) so you can find relevant lines even after they scroll off screen
@@ -68,6 +69,8 @@ python log_overlay.py --logfile "C:\X-Plane 12\Log.txt" --lines 20 --opacity 0.9
 |--------|--------|
 | Quit | Control bar X button or tray menu > Quit |
 | Show/Hide | Control bar Hide/Show button or tray menu > Show/Hide |
+| Read older lines | Drag the scrollbar, or use the mouse wheel over the scrollbar or tag bar |
+| Back to latest lines | Click LIVE in tag bar, or scroll to the bottom |
 | Filter Warnings | Click WARNINGS button in tag bar |
 | Filter Errors | Click ERRORS button in tag bar |
 | Show All | Click ALL button in tag bar (clears all filters) |

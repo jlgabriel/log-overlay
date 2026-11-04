@@ -16,6 +16,8 @@ Configuration:
 
 Controls:
     Control bar    -> Drag to move, Hide/Show, X to quit
+    Scrollbar      -> Drag, or use the mouse wheel, to read older lines
+    Tag bar        -> Filter lines; mouse wheel scrolls; LIVE returns to the end
     System tray    -> Right-click for menu
 """
 
@@ -24,12 +26,14 @@ import os
 import re
 import time
 import argparse
+import bisect
 import threading
 import configparser
 import subprocess
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox
+from tkinter import ttk
 from collections import deque
 
 # --- Win32 imports for click-through ---
@@ -60,6 +64,11 @@ try:
     HAS_TRAY = True
 except ImportError:
     HAS_TRAY = False
+
+
+HISTORY_LINES = 5000    # lines kept in memory for scrolling and filtering
+SCROLLBAR_WIDTH = 18    # pixels, taken from the configured overlay width
+WHEEL_LINES = 3         # lines scrolled per mouse wheel notch
 
 
 # --- Helpers ---
@@ -231,12 +240,13 @@ def extract_tag(line):
 class LogTailer:
     """Reads a log file in real-time (similar to tail -f)."""
 
-    def __init__(self, filepath, max_lines=15, callback=None):
+    def __init__(self, filepath, callback=None):
         self.filepath = filepath
-        self.max_lines = max_lines
         self.callback = callback
-        self.lines = deque(maxlen=max_lines)       # stores (line_text, tag) tuples
-        self.all_lines = deque(maxlen=5000)         # larger buffer for tag counting
+        self.all_lines = deque(maxlen=HISTORY_LINES)  # (line_text, tag) tuples
+        self.total_lines = 0    # lines ever appended since the last rotation
+        self.generation = 0     # incremented on every log rotation
+        self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread = None
 
@@ -249,8 +259,29 @@ class LogTailer:
         if self._thread:
             self._thread.join(timeout=2)
 
+    def snapshot(self):
+        """Return (entries, total_lines, generation) as a consistent copy."""
+        with self._lock:
+            return list(self.all_lines), self.total_lines, self.generation
+
+    def _append(self, lines):
+        entries = [(line, extract_tag(line)) for line in lines]
+        with self._lock:
+            self.all_lines.extend(entries)
+            self.total_lines += len(entries)
+
+    def _reset(self):
+        with self._lock:
+            self.all_lines.clear()
+            self.total_lines = 0
+            self.generation += 1
+
+    def _notify(self):
+        if self.callback:
+            self.callback()
+
     def _tail(self):
-        """Open the file, seek to end, and poll for new lines."""
+        """Open the file, load its tail, and poll for new lines."""
         while not os.path.exists(self.filepath):
             if self._stop_event.is_set():
                 return
@@ -258,64 +289,52 @@ class LogTailer:
 
         with open(self.filepath, "r", encoding="utf-8", errors="replace") as f:
             self._read_last_lines(f)
-            if self.callback:
-                self.callback(list(self.lines))
-
-            f.seek(0, 2)
+            self._notify()
 
             while not self._stop_event.is_set():
                 line = f.readline()
                 if line:
                     clean = line.rstrip("\n\r")
                     if clean:
-                        entry = (clean, extract_tag(clean))
-                        self.lines.append(entry)
-                        self.all_lines.append(entry)
-                        if self.callback:
-                            self.callback(list(self.lines))
+                        self._append([clean])
+                        self._notify()
                 else:
                     try:
                         current_pos = f.tell()
                         file_size = os.path.getsize(self.filepath)
                         if file_size < current_pos:
                             f.seek(0)
-                            self.lines.clear()
-                            self.all_lines.clear()
-                            if self.callback:
-                                self.callback(list(self.lines))
+                            self._reset()
+                            self._notify()
                     except OSError:
                         pass
                     time.sleep(0.2)
 
     def _read_last_lines(self, f):
-        """Read the last N lines of the file on startup."""
-        f.seek(0, 2)
-        file_size = f.tell()
-        if file_size == 0:
-            return
+        """Load up to HISTORY_LINES from the end of the file, leaving f at the end."""
+        raw = f.buffer
+        raw.seek(0, 2)
+        end = raw.tell()
 
-        block_size = 4096
-        blocks = []
-        remaining = file_size
+        # Work in bytes: seeking to arbitrary offsets is only safe on the raw file
+        chunks = []
+        pos = end
+        newlines = 0
+        while pos > 0 and newlines <= HISTORY_LINES:
+            size = min(65536, pos)
+            pos -= size
+            raw.seek(pos)
+            chunk = raw.read(size)
+            chunks.append(chunk)
+            newlines += chunk.count(b"\n")
 
-        while remaining > 0 and len(blocks) < 10:
-            read_size = min(block_size, remaining)
-            f.seek(remaining - read_size)
-            blocks.insert(0, f.read(read_size))
-            remaining -= read_size
+        data = b"".join(reversed(chunks))
+        if pos > 0:
+            data = data[data.find(b"\n") + 1:]  # drop the partial first line
 
-        text = "".join(blocks)
-        all_file_lines = text.splitlines()
-
-        # Load ALL lines into the big buffer for tag counting / filtering
-        for line in all_file_lines:
-            if line.strip():
-                entry = (line, extract_tag(line))
-                self.all_lines.append(entry)
-
-        # Only the last N into the visible buffer
-        for entry in list(self.all_lines)[-self.max_lines:]:
-            self.lines.append(entry)
+        text = data.decode("utf-8", errors="replace")
+        self._append([line for line in text.splitlines() if line.strip()])
+        f.seek(end)
 
 
 # --- Overlay Window ---
@@ -329,9 +348,16 @@ class OverlayWindow:
         self.visible = True
         self.active_tags = set()    # empty = show all
         self.severity_filter = None # None, "warning", or "error"
-        self._last_lines = []       # raw (line, tag) tuples from tailer
         self.tag_bar = None         # set after TagBar is created
+        self.scroll_bar = None      # set after ScrollBarWindow is created
         self.tailer = None          # set after LogTailer is created
+        self._dirty = False         # tailer has new data to display
+        self._generation = 0        # last log rotation seen
+        self._anchor_seq = None     # line kept at the bottom; None = follow live
+        self._seqs = []             # sequence numbers of the lines passing the filter
+        self._view_end = 0          # index in _seqs just past the last visible line
+        self._rendered = None       # lines currently in the text widget
+        self._status_base = ""
 
         bg = config["background"]
 
@@ -389,8 +415,12 @@ class OverlayWindow:
         # Make click-through after window is shown
         self.root.after(100, self._make_click_through)
 
+        # Wheel events only reach interactive windows (scrollbar, tag bar, controls)
+        self.root.bind_all("<MouseWheel>", self._on_mouse_wheel)
+        self.root.after(100, self._poll)
+
     def _position_window(self):
-        """Position the window in the chosen screen corner."""
+        """Position the window in the chosen screen corner, leaving room for the scrollbar."""
         width = self.config["width"]
 
         # Calculate height from actual font metrics
@@ -414,7 +444,8 @@ class OverlayWindow:
         }
 
         x, y = positions.get(self.config["position"], positions["bottom-right"])
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        self.root.geometry(f"{width - SCROLLBAR_WIDTH}x{height}+{x}+{y}")
+        self.bounds = (x, y, width, height)
 
     def _make_click_through(self):
         """Make the window click-through using Win32 API."""
@@ -451,72 +482,140 @@ class OverlayWindow:
             return "warning"
         return "normal"
 
-    def update_text(self, lines_with_tags):
-        """Update the displayed text (thread-safe via root.after).
+    def notify_new_lines(self):
+        """Called from the tailer thread; the main thread picks this up in _poll."""
+        self._dirty = True
 
-        Args:
-            lines_with_tags: list of (line_text, source_tag) tuples from tailer.lines (visible).
-        """
-        # Detect log rotation (empty list after buffers cleared) — reset filters
-        if not lines_with_tags and self._last_lines:
-            self.active_tags = set()
-            self.severity_filter = None
+    def _poll(self):
+        """Refresh at most once per interval, so log bursts don't freeze the UI."""
+        if self._dirty and self.tailer:
+            self._dirty = False
+            self._render()
             if self.tag_bar:
-                self.tag_bar._active.clear()
-                self.tag_bar._severity_filter = None
-                self.tag_bar._refresh_button_styles()
+                self.tag_bar.update_tags(self.tailer.snapshot()[0])
+        self.root.after(100, self._poll)
 
-        self._last_lines = lines_with_tags
+    def _reset_view_on_rotation(self, generation):
+        self._generation = generation
+        self._anchor_seq = None
+        self.active_tags = set()
+        self.severity_filter = None
+        if self.tag_bar:
+            self.tag_bar._active.clear()
+            self.tag_bar._severity_filter = None
+            self.tag_bar._refresh_button_styles()
 
-        def _update():
-            # When filtering, search the full buffer for matching lines
-            severity = getattr(self, 'severity_filter', None)
-            if severity and self.tailer:
-                all_matching = [(l, t) for l, t in self.tailer.all_lines
-                                if self._classify_line(l) == severity]
-                visible = all_matching[-self.max_lines:]
-            elif self.active_tags and self.tailer:
-                all_matching = [(l, t) for l, t in self.tailer.all_lines if t in self.active_tags]
-                visible = all_matching[-self.max_lines:]
+    def _render(self):
+        """Display the lines at the current scroll position."""
+        if not self.tailer:
+            return
+        entries, total, generation = self.tailer.snapshot()
+        if generation != self._generation:
+            self._reset_view_on_rotation(generation)
+
+        # Sequence numbers identify a line even as old ones leave the buffer
+        first_seq = total - len(entries)
+        if self.severity_filter:
+            matching = [(first_seq + i, e) for i, e in enumerate(entries)
+                        if self._classify_line(e[0]) == self.severity_filter]
+        elif self.active_tags:
+            matching = [(first_seq + i, e) for i, e in enumerate(entries)
+                        if e[1] in self.active_tags]
+        else:
+            matching = list(enumerate(entries, first_seq))
+        self._seqs = [seq for seq, _entry in matching]
+
+        count = len(matching)
+        end = count
+        if self._anchor_seq is not None:
+            end = max(bisect.bisect_right(self._seqs, self._anchor_seq),
+                      min(self.max_lines, count))
+            if end >= count:
+                self._anchor_seq = None
+        start = max(0, end - self.max_lines)
+        self._view_end = end
+
+        visible = [entry for _seq, entry in matching[start:end]]
+        if visible != self._rendered:
+            self._rendered = visible
+            self._write_lines(visible)
+
+        if self.scroll_bar:
+            if count:
+                self.scroll_bar.set(start / count, end / count)
             else:
-                visible = lines_with_tags
+                self.scroll_bar.set(0, 1)
+        if self.tag_bar:
+            self.tag_bar.set_live(self._anchor_seq is None)
+        self._update_status(start, end, count)
 
-            self.text.config(state=tk.NORMAL)
-            self.text.delete("1.0", tk.END)
-            if visible:
-                for i, (line, _src_tag) in enumerate(visible):
-                    if len(line) > 180:
-                        line = line[:177] + "..."
-                    color_tag = self._classify_line(line)
-                    if i > 0:
-                        self.text.insert(tk.END, "\n")
-                    self.text.insert(tk.END, line, color_tag)
-            else:
-                self.text.insert(tk.END, "(no matching lines)", "normal")
-            self.text.see(tk.END)
-            self.text.xview_moveto(0)
-            self.text.config(state=tk.DISABLED)
+    def _write_lines(self, visible):
+        self.text.config(state=tk.NORMAL)
+        self.text.delete("1.0", tk.END)
+        if visible:
+            for i, (line, _src_tag) in enumerate(visible):
+                if len(line) > 180:
+                    line = line[:177] + "..."
+                color_tag = self._classify_line(line)
+                if i > 0:
+                    self.text.insert(tk.END, "\n")
+                self.text.insert(tk.END, line, color_tag)
+        else:
+            self.text.insert(tk.END, "(no matching lines)", "normal")
+        self.text.see(tk.END)
+        self.text.xview_moveto(0)
+        self.text.config(state=tk.DISABLED)
 
-            # Update tag bar counts from the full buffer
-            if self.tag_bar and self.tailer:
-                self.tag_bar.update_tags(list(self.tailer.all_lines))
-            elif self.tag_bar:
-                self.tag_bar.update_tags(lines_with_tags)
+    def _update_status(self, start, end, count):
+        if self._anchor_seq is None:
+            self.status_label.config(text=self._status_base, fg="#555577")
+        else:
+            self.status_label.config(
+                text=f"{self._status_base}   |   PAUSED: lines {start + 1}-{end} of {count}"
+                     f"   |   {count - end} newer",
+                fg=self.config["color_warning"],
+            )
 
-        self.root.after(0, _update)
+    def _set_view_end(self, end):
+        """Move the view so `end` is just past its last line, then redraw."""
+        count = len(self._seqs)
+        end = max(min(self.max_lines, count), min(end, count))
+        self._anchor_seq = None if end >= count else self._seqs[end - 1]
+        self._render()
+
+    def on_scrollbar(self, action, *args):
+        """Handle the scrollbar's standard commands: moveto / scroll."""
+        if action == "moveto":
+            start = round(float(args[0]) * len(self._seqs))
+            self._set_view_end(start + self.max_lines)
+        elif action == "scroll":
+            amount, unit = int(args[0]), args[1]
+            step = self.max_lines if unit.startswith("page") else 1
+            self._set_view_end(self._view_end + amount * step)
+
+    def _on_mouse_wheel(self, event):
+        lines = -event.delta / 120 * WHEEL_LINES
+        if lines:
+            # High-resolution wheels report small deltas: always move at least 1 line
+            step = int(lines) or (1 if lines > 0 else -1)
+            self._set_view_end(self._view_end + step)
+        return "break"
+
+    def go_live(self):
+        """Return to the end of the log and follow new lines."""
+        self._anchor_seq = None
+        self._render()
 
     def set_filter(self, tags, severity=None):
         """Set active filter tags and/or severity. Empty set + None = show all."""
         self.active_tags = tags
         self.severity_filter = severity
-        if self._last_lines:
-            self.update_text(self._last_lines)
+        self.go_live()
 
     def set_status(self, text):
-        """Update the status bar text."""
-        def _update():
-            self.status_label.config(text=text)
-        self.root.after(0, _update)
+        """Set the status bar text (main thread only)."""
+        self._status_base = text
+        self.status_label.config(text=text)
 
     def toggle_visibility(self):
         """Show or hide the overlay and tag bar."""
@@ -524,10 +623,14 @@ class OverlayWindow:
             self.root.withdraw()
             if self.tag_bar:
                 self.tag_bar.win.withdraw()
+            if self.scroll_bar:
+                self.scroll_bar.win.withdraw()
         else:
             self.root.deiconify()
             if self.tag_bar:
                 self.tag_bar.win.deiconify()
+            if self.scroll_bar:
+                self.scroll_bar.win.deiconify()
         self.visible = not self.visible
 
     def quit(self):
@@ -536,6 +639,49 @@ class OverlayWindow:
 
     def run(self):
         self.root.mainloop()
+
+
+# --- Scrollbar ---
+
+class ScrollBarWindow:
+    """Scrollbar beside the overlay. A separate window because the overlay is click-through."""
+
+    def __init__(self, overlay):
+        bg = overlay.config["background"]
+        x, y, width, height = overlay.bounds
+
+        self.win = tk.Toplevel(overlay.root)
+        self.win.title("Log Scroll")
+        self.win.overrideredirect(True)
+        self.win.attributes("-topmost", True)
+        self.win.attributes("-alpha", 0.90)
+        self.win.configure(bg=bg)
+
+        # The "clam" theme is the built-in one that honors custom colors on Windows
+        style = ttk.Style(self.win)
+        style.theme_use("clam")
+        style.configure(
+            "Log.Vertical.TScrollbar",
+            background="#3a3a6e", troughcolor=bg, bordercolor=bg,
+            lightcolor="#3a3a6e", darkcolor="#3a3a6e",
+            arrowcolor="#b0b0cc", arrowsize=SCROLLBAR_WIDTH,
+        )
+        style.map("Log.Vertical.TScrollbar", background=[("active", "#5a5a9e")])
+
+        self.bar = ttk.Scrollbar(
+            self.win, orient=tk.VERTICAL, command=overlay.on_scrollbar,
+            style="Log.Vertical.TScrollbar",
+        )
+        self.bar.pack(fill=tk.BOTH, expand=True)
+        # Replaces ttk's built-in wheel handling, which would scroll a second time
+        self.bar.bind("<MouseWheel>", overlay._on_mouse_wheel)
+
+        self.win.geometry(
+            f"{SCROLLBAR_WIDTH}x{height}+{x + width - SCROLLBAR_WIDTH}+{y}"
+        )
+
+    def set(self, first, last):
+        self.bar.set(first, last)
 
 
 # --- Tag Filter Bar ---
@@ -590,6 +736,16 @@ class TagBar:
             command=lambda: self._toggle_severity("error"),
         )
         self._err_btn.pack(side=tk.LEFT, padx=2)
+
+        # LIVE button: back to the end of the log after scrolling
+        self._live_btn = tk.Button(
+            self._frame, text="LIVE", font=self._btn_font,
+            activebackground="#3a7a4e", activeforeground="#ffffff",
+            relief=tk.FLAT, padx=6, pady=1,
+            command=self.overlay.go_live,
+        )
+        self._live_btn.pack(side=tk.LEFT, padx=2)
+        self.set_live(True)
 
         # Position near the overlay
         self.win.update_idletasks()
@@ -647,6 +803,13 @@ class TagBar:
 
         self._refresh_button_styles()
         self.win.update_idletasks()
+
+    def set_live(self, is_live):
+        """Show whether the overlay is following the log or paused on older lines."""
+        if is_live:
+            self._live_btn.config(fg="#6bcf8e", bg="#2a3e32")
+        else:
+            self._live_btn.config(fg="#ffffff", bg="#2e8a4e")
 
     def _toggle_severity(self, level):
         """Toggle a severity filter (warning/error) on/off."""
@@ -935,10 +1098,10 @@ def main():
     overlay = OverlayWindow(config)
     tailer = LogTailer(
         filepath=logpath,
-        max_lines=config["lines"],
-        callback=overlay.update_text,
+        callback=overlay.notify_new_lines,
     )
     overlay.tailer = tailer
+    overlay.scroll_bar = ScrollBarWindow(overlay)
     tag_bar = TagBar(overlay)
     overlay.tag_bar = tag_bar
     control_bar = ControlBar(overlay)
